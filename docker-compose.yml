@@ -1,0 +1,13 @@
+# The bot joins the binai stack's network to reach postgres; no ports are exposed.
+services:
+  bot:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    networks: [binai]
+
+networks:
+  binai:
+    external: true
+    name: binai_binai-network
