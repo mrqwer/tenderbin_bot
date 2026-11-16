@@ -51,3 +51,15 @@ def test_digest_text():
     text = bot.digest_text("ТОО Ромашка", [lot(i) for i in range(7)], [lot(9, None)], NOW)
     assert "🆕 Новые подходящие лоты: 7" in text and "…и ещё 2" in text and "Лот 5" not in text
     assert "⏰ Скоро срок у лотов в работе: 1" in text
+
+
+def test_banner_falls_back_to_text_and_edit_under_a_picture_sends_anew(monkeypatch):
+    tg, calls = bot.Telegram("x"), []
+    monkeypatch.setattr(bot.Telegram, "banner_id", None)
+    monkeypatch.setattr(tg, "upload", lambda *a, **k: {"ok": False, "description": "boom"})
+    monkeypatch.setattr(tg, "call", lambda method, **k: calls.append((method, k.get("message_id"))) or (
+        {"ok": False, "description": "Bad Request: there is no text in the message to edit"}
+        if method == "editMessageText" else {"ok": True}))
+    assert tg.send_banner(1, "привет") and calls == [("sendMessage", None)]
+    calls.clear()
+    assert tg.send(1, "лента", message_id=9) and calls == [("editMessageText", 9), ("sendMessage", None)]

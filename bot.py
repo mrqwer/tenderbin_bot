@@ -27,6 +27,7 @@ SOON_HOURS = 48          # a kanban lot closing within this is "soon"
 MAX_LOTS = 5             # lots listed per section; the rest are counted
 
 PAGE = 5                 # lots on one page of a list
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 
 # --- link tokens -----------------------------------------------------------
@@ -248,11 +249,49 @@ class Telegram:
             # 403: the user blocked the bot. The body says why; the URL holds the token.
             return json.load(exc)
 
+    def upload(self, method: str, field: str, path: str, **params) -> dict:
+        """A call with one file attached (multipart/form-data)."""
+        boundary = "----tenderbin" + os.urandom(8).hex()
+        parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+                 for k, v in params.items() if v is not None]
+        with open(path, "rb") as f:
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; '
+                         f'filename="{os.path.basename(path)}"\r\n'
+                         f'Content-Type: application/octet-stream\r\n\r\n'.encode() + f.read() + b"\r\n")
+        request = urllib.request.Request(self.base + method, b"".join(parts) + f"--{boundary}--\r\n".encode(),
+                                         {"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as exc:
+            return json.load(exc)
+
+    banner_id = None  # Telegram's id of the uploaded banner: the file is sent once per process
+
+    def send_banner(self, chat_id: int, caption: str, keyboard: str | None = None) -> bool:
+        """The banner picture with a caption (1024 characters at most); plain text if the picture fails."""
+        common = dict(chat_id=chat_id, caption=caption[:1024], parse_mode="HTML", reply_markup=keyboard)
+        try:
+            if self.banner_id:
+                answer = self.call("sendPhoto", photo=self.banner_id, **common)
+            else:
+                answer = self.upload("sendPhoto", "photo", os.path.join(ASSETS, "banner.jpg"), **common)
+        except OSError as exc:
+            answer = {"description": str(exc)}
+        if answer.get("ok"):
+            Telegram.banner_id = answer["result"]["photo"][-1]["file_id"]
+            return True
+        logger.warning("chat %s: banner not sent: %s", chat_id, answer.get("description"))
+        return self.send(chat_id, caption, keyboard)
+
     def send(self, chat_id: int, text: str, keyboard: str | None = None, message_id: int | None = None) -> bool:
         """Sends a message, or rewrites `message_id` in place (a button press)."""
         answer = self.call("editMessageText" if message_id else "sendMessage", chat_id=chat_id,
                            message_id=message_id, text=text[:4000], parse_mode="HTML",
                            disable_web_page_preview="true", reply_markup=keyboard)
+        if message_id and "no text in the message" in str(answer.get("description")):
+            # The button sits under a picture, which cannot become a text: answer below it.
+            return self.send(chat_id, text, keyboard)
         ok = bool(answer.get("ok")) or "not modified" in str(answer.get("description"))
         if not ok:
             logger.warning("chat %s: not sent: %s", chat_id, answer.get("description"))
@@ -284,16 +323,20 @@ def link(conn, tg: Telegram, secret: str, chat_id: int, token: str) -> None:
         "ON CONFLICT (chat_id) DO UPDATE SET user_id = EXCLUDED.user_id, muted = false, "
         "linked_at = now(), last_digest_at = NULL", (chat_id, user_id))
     conn.commit()
-    tg.send(chat_id, f"✅ <b>Готово!</b> Чат привязан к компании «{esc(row[0])}».\n\n"
-                     f"Каждое утро в {DIGEST_HOUR}:00 пришлю новые подходящие лоты и напомню о сроках. "
-                     "А пока — загляните в меню.", menu_kb())
+    tg.send_banner(chat_id, f"✅ <b>Готово!</b> Чат привязан к компании «{esc(row[0])}».\n\n"
+                            f"Каждое утро в {DIGEST_HOUR}:00 пришлю новые подходящие лоты и напомню о сроках. "
+                            "А пока — загляните в меню.", menu_kb())
 
 
 def show(conn, tg: Telegram, chat_id: int, view: str, message_id: int | None = None) -> None:
     """Renders one screen; `view` is a command name or a button's callback data."""
     user = linked_user(conn, chat_id)
     if not user:
-        tg.send(chat_id, NOT_LINKED, _kb([("🌐 Открыть TenderTap", SITE_URL)]), message_id)
+        site = _kb([("🌐 Открыть TenderTap", SITE_URL)])
+        if message_id:
+            tg.send(chat_id, NOT_LINKED, site, message_id)
+        else:
+            tg.send_banner(chat_id, NOT_LINKED, site)
         return
     _, company, muted = user
     name, _, arg = view.partition(":")
@@ -403,6 +446,12 @@ def main() -> None:
     tg = Telegram(os.environ["BOT_TOKEN"])
     secret, dsn = os.environ["LINK_SECRET"], os.environ["DATABASE_URL"]
     tg.call("setMyCommands", commands=json.dumps([{"command": c, "description": d} for c, d in COMMANDS]))
+    tg.call("setMyShortDescription", short_description="Подходящие тендеры для вашей компании: новые лоты и сроки каждое утро.")
+    tg.call("setMyDescription", description=(
+        "TenderTap подбирает государственные и корпоративные закупки под каталог вашей компании.\n\n"
+        "Бот каждое утро присылает новые подходящие лоты и напоминает о сроках по лотам в работе, "
+        "а по кнопкам показывает ленту, сроки и цифры по компании.\n\n"
+        "Чтобы начать, подключите бота в личном кабинете на " + SITE_URL))
     logger.info("started as @%s", tg.call("getMe").get("result", {}).get("username"))
     offset = 0
     while True:
