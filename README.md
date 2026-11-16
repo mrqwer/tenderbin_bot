@@ -1,11 +1,18 @@
 # tenderbin_bot
 
-Telegram bot for TenderTap customers. Every morning (09:00 Almaty) each linked
-user gets one message: new direct-match lots in their company's feed since the
-last digest, and lots on the kanban that close within 48 hours. Nothing to
-say — no message.
+Telegram bot for TenderTap customers.
 
-Commands: `/today` digest now, `/stop` mute, `/start` unmute.
+- **Morning digest** (09:00 Almaty), one message per linked user: new
+  direct-match lots in the company's feed since the last digest, and lots on
+  the kanban that close within 48 hours. Nothing to say — no message.
+- **Menu with buttons**: new lots of the last day, the whole feed and the
+  kanban deadlines as paged lists, the company's numbers, settings (digest
+  on/off, unlink the chat), help.
+- **Commands**: `/menu`, `/today`, `/new`, `/feed`, `/deadlines`, `/stats`,
+  `/settings`, `/help`; Telegram shows them in the command list.
+
+The bot only reads the site's data; marking a lot or taking it to work stays
+on the site.
 
 ## Linking a chat to a site user
 

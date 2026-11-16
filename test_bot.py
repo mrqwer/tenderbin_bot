@@ -1,6 +1,14 @@
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 
 import bot
+
+NOW = datetime(2026, 11, 18, 10, 0, tzinfo=timezone.utc)
+END = datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc)
+
+
+def lot(i, fit="direct"):
+    return (f"Лот {i} <b>", 1500000, END, f"https://x/{i}?a=1&b=2", "ГУ «Аппарат акима»", fit, "Окна ПВХ")
 
 
 def test_link_token_round_trip_and_rejections():
@@ -14,12 +22,32 @@ def test_link_token_round_trip_and_rejections():
     assert bot.read_token("s3cret", "garbage", now=1000) is None
 
 
+def test_lot_block_escapes_and_shows_the_facts():
+    text = bot.lot_block(1, lot(0), NOW)
+    assert "🎯 <b>1. Лот 0 &lt;b&gt;</b>" in text                      # a lot name cannot break the markup
+    assert "💰 1 500 000 ₸ · ⏳ до 20.11 15:00 (осталось 2 дн.)" in text   # Almaty time
+    assert "🧩 Ваш товар: <i>Окна ПВХ</i>" in text
+    assert '<a href="https://x/0?a=1&amp;b=2">' in text
+    assert bot.time_left(NOW + timedelta(hours=5), NOW) == "5 ч"
+    assert bot.time_left(NOW + timedelta(minutes=20), NOW) == "меньше часа"
+
+
+def test_list_pages_and_pager():
+    rows = [lot(i) for i in range(12)]
+    text, pages = bot.list_page("Лента", rows, 2, "пусто", NOW)
+    assert pages == 3 and "всего 12" in text and "11. Лот 10" in text and "Лот 9 " not in text
+    assert bot.list_page("Лента", rows, 99, "пусто", NOW)[0] == text          # a page past the end is the last one
+    assert bot.list_page("Лента", [], 0, "пусто", NOW) == ("<b>Лента</b>\n\nпусто", 1)
+    first = json.loads(bot.pager_kb("feed", 0, 3))["inline_keyboard"][0]
+    assert [b["callback_data"] for b in first] == ["noop", "noop", "feed:1"]
+    assert len(json.loads(bot.pager_kb("feed", 0, 1))["inline_keyboard"]) == 1  # one page: no arrows
+    for row in json.loads(bot.menu_kb())["inline_keyboard"]:
+        for button in row:
+            assert len(button.get("callback_data", "")) <= 64                   # Telegram's limit
+
+
 def test_digest_text():
     assert bot.digest_text("ТОО Ромашка", [], []) is None
-    end = datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc)
-    new = [(f"Лот {i}", 1500000, end, f"https://x/{i}") for i in range(7)]
-    text = bot.digest_text("ТОО Ромашка", new, [("Окна ПВХ", None, end, None)])
-    assert "Новые подходящие лоты: 7" in text
-    assert "• Лот 0 — 1 500 000 ₸ — до 20.11 15:00\n  https://x/0" in text   # Almaty time
-    assert "…и ещё 2" in text and "Лот 5" not in text
-    assert "Скоро срок у лотов в работе: 1\n• Окна ПВХ — до 20.11 15:00" in text
+    text = bot.digest_text("ТОО Ромашка", [lot(i) for i in range(7)], [lot(9, None)], NOW)
+    assert "🆕 Новые подходящие лоты: 7" in text and "…и ещё 2" in text and "Лот 5" not in text
+    assert "⏰ Скоро срок у лотов в работе: 1" in text
