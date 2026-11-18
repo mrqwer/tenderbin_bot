@@ -23,6 +23,8 @@ ALMATY = timezone(timedelta(hours=5))
 DIGEST_HOUR = int(os.getenv("DIGEST_HOUR", "9"))        # Almaty time
 SITE_URL = os.getenv("SITE_URL", "https://tendertap.kz")
 LINK_TTL = 15 * 60       # seconds a link from the site stays valid
+QUIET_HOUR = 21          # Almaty time: no alerts from this hour until the next digest
+ALERT_MINUTES = 30       # how often new direct matches are looked for
 SOON_HOURS = 48          # a kanban lot closing within this is "soon"
 MAX_LOTS = 5             # lots listed per section; the rest are counted
 
@@ -180,9 +182,20 @@ def digest_text(company: str, new: list, soon: list, now: datetime | None = None
     return "\n\n".join(parts)
 
 
+def alert_text(new: list, now: datetime | None = None) -> str:
+    """The daytime message about direct matches that have just appeared."""
+    title = "Новый подходящий лот" if len(new) == 1 else f"Новые подходящие лоты: {len(new)}"
+    text = f"🆕 <b>{title}</b>\n\n" + "\n\n".join(lot_block(i + 1, r, now) for i, r in enumerate(new[:MAX_LOTS]))
+    if len(new) > MAX_LOTS:
+        text += f"\n\n…и ещё {len(new) - MAX_LOTS}, смотрите по кнопке ниже"
+    return text
+
+
 HELP = """<b>Что умеет бот</b>
 
 ☀️ Каждое утро в {hour}:00 присылает сводку: новые подходящие лоты и лоты из «В работе», у которых скоро срок. Если новостей нет — не беспокоит.
+
+🆕 Днём, до {quiet}:00, сразу пишет о новом лоте с прямым совпадением — не нужно ждать утра.
 
 <b>Команды</b>
 /menu — главное меню
@@ -191,7 +204,7 @@ HELP = """<b>Что умеет бот</b>
 /feed — вся лента подходящих лотов
 /deadlines — сроки по лотам в работе
 /stats — цифры по вашей компании
-/settings — включить или выключить сводку, отвязать чат
+/settings — включить или выключить уведомления, отвязать чат
 /help — эта справка
 
 🎯 — прямое совпадение с вашим каталогом, 🔗 — смежный лот."""
@@ -230,7 +243,7 @@ def pager_kb(view: str, page: int, pages: int) -> str:
 
 
 def settings_kb(muted: bool) -> str:
-    return _kb([("🔔 Включить утреннюю сводку" if muted else "🔕 Выключить утреннюю сводку", "mute:0" if muted else "mute:1")],
+    return _kb([("🔔 Включить уведомления" if muted else "🔕 Выключить уведомления", "mute:0" if muted else "mute:1")],
                [("🔌 Отвязать этот чат", "unlink")], [("🏠 Меню", "menu")])
 
 
@@ -377,16 +390,16 @@ def show(conn, tg: Telegram, chat_id: int, view: str, message_id: int | None = N
         conn.commit()
         show(conn, tg, chat_id, "settings", message_id)
     elif name == "settings":
-        state = "🔕 выключена" if muted else f"🔔 включена, приходит в {DIGEST_HOUR}:00"
+        state = "🔕 выключены" if muted else f"🔔 сводка в {DIGEST_HOUR}:00, новые лоты сразу до {QUIET_HOUR}:00"
         tg.send(chat_id, f"⚙️ <b>Настройки</b>\n\nКомпания: {esc(company_name(conn, company))}\n"
-                         f"Утренняя сводка: {state}", settings_kb(muted), message_id)
+                         f"Уведомления: {state}", settings_kb(muted), message_id)
     elif name == "unlink":
         conn.cursor().execute("DELETE FROM bot.chats WHERE chat_id = %s", (chat_id,))
         conn.commit()
         tg.send(chat_id, "🔌 Чат отвязан. Чтобы подключить снова, получите ссылку в личном кабинете.",
                 _kb([("🌐 Открыть TenderTap", SITE_URL)]), message_id)
     elif name == "help":
-        tg.send(chat_id, HELP.format(hour=DIGEST_HOUR), menu_kb(), message_id)
+        tg.send(chat_id, HELP.format(hour=DIGEST_HOUR, quiet=QUIET_HOUR), menu_kb(), message_id)
     else:  # menu, start, and anything we do not know
         tg.send(chat_id, f"🏠 <b>Главное меню</b>\n{esc(company_name(conn, company))}\n\nЧто показать?",
                 menu_kb(), message_id)
@@ -439,6 +452,30 @@ def send_digests(conn, tg: Telegram, now: datetime | None = None) -> int:
     return sent
 
 
+def send_alerts(conn, tg: Telegram, since: datetime, now: datetime | None = None) -> int:
+    """Direct matches first seen after `since`, to every unmuted chat. Only
+    between the digest and QUIET_HOUR, and only to chats that already had
+    today's digest: the night's lots belong to the digest."""
+    now = now or datetime.now(timezone.utc)
+    local = now.astimezone(ALMATY)
+    if not DIGEST_HOUR <= local.hour < QUIET_HOUR:
+        return 0
+    day_start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    chats = _rows(conn, "SELECT c.chat_id, u.company_id, c.last_digest_at FROM bot.chats c "
+                        "JOIN core.users u ON u.id = c.user_id "
+                        "WHERE NOT c.muted AND u.is_active AND u.company_id IS NOT NULL "
+                        "AND c.last_digest_at >= %(day)s", day=day_start)
+    sent, by_company = 0, {}
+    for chat_id, company, last in chats:
+        start = max(since, last)
+        key = (company, start)
+        if key not in by_company:
+            by_company[key] = new_lots(conn, company, start)
+        if by_company[key] and tg.send(chat_id, alert_text(by_company[key], now), menu_kb()):
+            sent += 1
+    return sent
+
+
 def main() -> None:
     import psycopg
 
@@ -454,6 +491,10 @@ def main() -> None:
         "Чтобы начать, подключите бота в личном кабинете на " + SITE_URL))
     logger.info("started as @%s", tg.call("getMe").get("result", {}).get("username"))
     offset = 0
+    # ponytail: the alert cursor lives in memory, so lots that appear while the
+    # bot is down are not alerted (the next digest still lists them); a column
+    # in bot.chats if that matters.
+    alerted = datetime.now(timezone.utc)
     while True:
         try:
             with psycopg.connect(dsn) as conn:
@@ -461,6 +502,12 @@ def main() -> None:
                     sent = send_digests(conn, tg)
                     if sent:
                         logger.info("digest sent to %s chats", sent)
+                    now = datetime.now(timezone.utc)
+                    if now - alerted >= timedelta(minutes=ALERT_MINUTES):
+                        sent = send_alerts(conn, tg, alerted, now)
+                        alerted = now
+                        if sent:
+                            logger.info("alert sent to %s chats", sent)
                     updates = tg.call("getUpdates", http_timeout=60, offset=offset, timeout=50,
                                       allowed_updates='["message","callback_query"]')
                     for update in updates.get("result", []):

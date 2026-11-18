@@ -63,3 +63,28 @@ def test_banner_falls_back_to_text_and_edit_under_a_picture_sends_anew(monkeypat
     assert tg.send_banner(1, "привет") and calls == [("sendMessage", None)]
     calls.clear()
     assert tg.send(1, "лента", message_id=9) and calls == [("editMessageText", 9), ("sendMessage", None)]
+
+
+def test_alerts_go_by_day_only_and_start_from_the_later_of_cursor_and_digest(monkeypatch):
+    lot = ("Окна ПВХ", 1_000_000, None, "https://x/1", "Школа №12", "direct", "окна")
+    day = datetime(2026, 11, 18, 7, 0, tzinfo=timezone.utc)      # 12:00 Almaty
+    digest = day - timedelta(hours=3)
+    asked, sent = [], []
+    monkeypatch.setattr(bot, "_rows", lambda conn, sql, **p: [(10, 1, digest), (11, 1, digest), (12, 2, digest)])
+    monkeypatch.setattr(bot, "new_lots", lambda conn, company, since: asked.append((company, since)) or ([lot] if company == 1 else []))
+
+    class Tg:
+        def send(self, chat_id, text, keyboard=None):
+            sent.append((chat_id, text))
+            return True
+
+    since = day - timedelta(minutes=30)
+    assert bot.send_alerts(None, Tg(), since, day) == 2
+    assert [c for c, _ in sent] == [10, 11] and "Новый подходящий лот" in sent[0][1] and "Окна ПВХ" in sent[0][1]
+    assert asked == [(1, since), (2, since)]                     # one query per company
+    # The cursor is older than the digest (the bot restarted): the digest wins.
+    asked.clear()
+    bot.send_alerts(None, Tg(), digest - timedelta(hours=5), day)
+    assert asked[0] == (1, digest)
+    # 23:00 Almaty: silence.
+    assert bot.send_alerts(None, Tg(), since, day + timedelta(hours=11)) == 0

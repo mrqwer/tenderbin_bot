@@ -5,8 +5,12 @@ Telegram bot for TenderTap customers.
 - **Morning digest** (09:00 Almaty), one message per linked user: new
   direct-match lots in the company's feed since the last digest, and lots on
   the kanban that close within 48 hours. Nothing to say — no message.
+- **Daytime alerts**: every 30 minutes between the digest and 21:00 Almaty,
+  a message about direct-match lots that have just appeared. The cursor is
+  kept in memory, so lots that appear while the bot is down wait for the
+  next digest.
 - **Menu with buttons**: new lots of the last day, the whole feed and the
-  kanban deadlines as paged lists, the company's numbers, settings (digest
+  kanban deadlines as paged lists, the company's numbers, settings (notifications
   on/off, unlink the chat), help.
 - **Commands**: `/menu`, `/today`, `/new`, `/feed`, `/deadlines`, `/stats`,
   `/settings`, `/help`; Telegram shows them in the command list.
